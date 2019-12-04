@@ -1,82 +1,30 @@
 import random
 from datetime import timedelta
-#from osrsbox import items_api, monsters_api
+from osrsbox import items_api, monsters_api
 
-#all_db_monsters = monsters_api.load()
+def monster_complete(m):
+    return m.defence_level >= 1 and m.hitpoints >= 1
 
-SLASH = 'slash'
-STAB = 'stab'
-CRUSH = 'crush'
+all_monsters = monsters_api.load()
+f2p_monsters = [m for m in all_monsters if not m.members and monster_complete(m)]
+monsters = {}
+for m in f2p_monsters:
+    if (m.name, m.combat_level) not in monsters:
+        monsters[(m.name, m.combat_level)] = m
+monsters = list(monsters.values())
 
-class Enemy(object):
-    def __init__(self, name, hp, def_lvl, stab, slash, crush):
-        self.name = name
-        self.hp = hp
-        self.def_lvl = def_lvl
-        self.stab = stab
-        self.slash = slash
-        self.crush = crush
+all_items = items_api.load()
+f2p_weapons = [i for i in all_items if i.weapon and (not i.members)
+               and i.tradeable]
+weapons = [w for w in f2p_weapons if
+           any(s in w.name for s in ['scimitar'])]
 
-    def max_def_roll(self, dmg_type):
-        equip_bonus = getattr(self, dmg_type)
-        return (self.def_lvl + 9) * (equip_bonus + 64)
+cache = {}
 
-chicken = Enemy('Chicken', 3, 1, -42, -42, -42)
-cow = Enemy('Cow', 8, 1, -21, -21, -21)
-goblin = Enemy('Goblin', 5, 1, -15, -15, -15)
-hill_giant = Enemy('Hill Giant', 35, 26, 0, 0, 0)
-
-enemies = [
-    chicken,
-    cow,
-    goblin,
-    hill_giant
-]
-
-
-class Weapon(object):
-    def __init__(self, name, level, strength, stab, slash, crush, speed,
-                 controlled, aggressive):
-        self.name = name
-        self.level = level
-        self.strength = strength
-        self.stab = stab
-        self.slash = slash
-        self.crush = crush
-        self.interval = speed * 0.6
-        self.controlled = controlled
-        self.aggressive = aggressive
-
-    def attack(self, aggressive=False):
-        if aggressive:
-            return getattr(self, self.aggressive)
-        else:
-            return getattr(self, self.controlled)
-
-iron_scim = Weapon('Iron Scimitar', 1, 9, 2, 10, -2, 4, SLASH, SLASH)
-iron_2h = Weapon('Iron 2h', 1, 14, -4, 13, 10, 7, SLASH, SLASH)
-
-black_scim = Weapon('Black Scimitar', 10, 14, 4, 19, -2, 4, SLASH, SLASH)
-black_2h = Weapon('Black 2h', 10, 26, -4, 27, 21, 7, SLASH, SLASH)
-
-mith_scim = Weapon('Mithril Scimitar', 20, 20, 5, 21, -2, 4, SLASH, SLASH)
-mith_2h = Weapon('Mithril 2h', 20, 31, -4, 30, 24, 7, SLASH, SLASH)
-
-addy_scim = Weapon('Addy Scimitar', 30, 28, 6, 29, -2, 4, SLASH, SLASH)
-addy_2h = Weapon('Addy 2h', 30, 44, -4, 43, 30, 7, SLASH, SLASH)
-
-rune_scim = Weapon('Rune Scimitar', 40, 44, 7, 45, -2, 6, SLASH, SLASH)
-rune_2h = Weapon('Rune 2h', 40, 70, -4, 69, 50, 7, SLASH, SLASH)
-
-weapons = [
-    iron_scim, iron_2h,
-    black_scim, black_2h,
-    mith_scim, mith_2h,
-    addy_scim, addy_2h,
-    rune_scim, rune_2h
-]
-
-
+"""
+Calculate the expected number of hits to kill an enemy, given hit chance, max
+hit, and the enemy's HP.
+"""
 def expected_htk(hit_chance, max_hit, hp):
     dic = {}
     def T(n):
@@ -99,48 +47,78 @@ def expected_htk(hit_chance, max_hit, hp):
     return T(hp)
 
 
-class Player(object):
-    def __init__(self, attack=1, strength=1, weapon=iron_2h):
-        self.attack = attack
-        self.strength = strength
-        self.weapon = weapon
+"""
+Compute expected time to kill a monster given attack level, strength level,
+weapon, and weapon stance.
+"""
+def expected_ttk(attack, strength, monster, weapon, stance):
+    # Calculate strength and attack bonuses due to combat stance
+    str_bonus = 0
+    atk_bonus = 0
+    if stance['attack_style'] == 'accurate':
+        atk_bonus = 3
+    elif stance['attack_style'] == 'controlled':
+        str_bonus = 1
+        atk_bonus = 1
+    elif stance['attack_style'] == 'aggressive':
+        str_bonus = 3
 
-    def expected_ttk(self, enemy, aggressive=False):
-        effective_str = self.strength + aggressive * 3 + 8
-        max_hit = int(0.5 + effective_str * (self.weapon.strength + 64) / 640)
+    # Calculate the player's max hit
+    effective_str = strength + str_bonus + 8
+    max_hit = int(0.5 + effective_str * (weapon.equipment.melee_strength + 64) / 640)
 
-        effective_atk = self.attack + (not aggressive) * 3 + 8
-        max_atk_roll = effective_atk * (self.weapon.attack(aggressive) + 64)
+    # Calculate the player's max attack roll
+    effective_atk = attack + atk_bonus + 8
+    weapon_atk = getattr(weapon.equipment, "attack_" + stance['attack_type'])
+    max_atk_roll = effective_atk * (weapon_atk + 64)
 
-        if aggressive:
-            dmg_type = self.weapon.aggressive
-        else:
-            dmg_type = self.weapon.controlled
+    # Calculate the monster's max defence roll
+    monster_equip_bonus = getattr(monster, "defence_" + stance['attack_type'])
+    monster_def_roll =  (monster.defence_level + 9) * (monster_equip_bonus + 64)
 
-        enemy_def_roll = enemy.max_def_roll(dmg_type)
-        if max_atk_roll > enemy_def_roll:
-            hit_chance = 1 - enemy_def_roll / (2. * max_atk_roll)
-        else:
-            hit_chance = max_atk_roll / (3. * enemy_def_roll)
+    # Calculate the chance of a hit (not a splash)
+    if max_atk_roll > monster_def_roll:
+        hit_chance = 1 - monster_def_roll / (2. * max_atk_roll)
+    else:
+        hit_chance = max_atk_roll / (3. * monster_def_roll)
 
-        return expected_htk(hit_chance, max_hit, enemy.hp) * self.weapon.interval + 3
+    # Calculate how long it should take to kill the monster
+    expected_ttk = expected_htk(hit_chance, max_hit, monster.hitpoints) * \
+        weapon.weapon.attack_speed * 0.6 + 3
+    return expected_ttk
 
-    def xp_rate(self, enemy, aggressive=False):
-        return enemy.hp * 4. / self.expected_ttk(enemy, aggressive)
+def xp_rate(attack, strength, monster, weapon, stance):
+    tup = (attack, strength, monster.id, weapon.id, stance['combat_style'])
+    if tup in cache:
+        return cache[tup]
+    else:
+        ettk = expected_ttk(attack, strength, monster, weapon, stance)
+        ev = monster.hitpoints * 4. / ettk
+        cache[tup] = ev
+        return ev
 
 
+# For a given attack level, strength level, and training style, find the fastest
+# possible way to get to the next level
 def best_rate(attack, strength, aggressive):
     best_rate = 0
     best_combo = None
 
-    for w in weapons:
-        if attack < w.level:
+    for weapon in weapons:
+        if weapon.equipment.requirements and \
+                attack < weapon.equipment.requirements['attack']:
             continue
-        for e in enemies:
-            rate = Player(attack, strength, w).xp_rate(e, aggressive)
-            if rate > best_rate:
-                best_rate = rate
-                best_combo = w.name, e.name
+
+        for stance in weapon.weapon.stances:
+            if (aggressive and stance['experience'] == 'strength' or
+                (not aggressive) and stance['experience'] == 'attack'):
+                for monster in monsters:
+                    rate = xp_rate(attack, strength, monster, weapon, stance)
+                    if rate > best_rate:
+                        best_rate = rate
+                        best_combo = (weapon.name, stance['combat_style'],
+                                      '%s lvl %d' % (monster.name,
+                                                     monster.combat_level))
 
     return best_combo, best_rate
 
@@ -195,9 +173,17 @@ def best_path(start_atk, start_str, end_atk, end_str):
         path.append(best_paths[tup])
 
     steps = path[::-1]
+    phases = []
     for i in range(1, len(steps)):
-        print(steps[i][2], steps[i][1],
-            timedelta(seconds=steps[i][0] - steps[i-1][0]))
+        td = timedelta(seconds=steps[i][0] - steps[i-1][0])
+        if steps[i][1] != steps[i-1][1]:
+            phases.append([steps[i][1], steps[i][2], steps[i][2], td])
+        else:
+            phases[-1][2] = steps[i][2]
+            phases[-1][3] += td
+
+    for p in phases:
+        print(p[0], p[1], p[2])
 
     print('total time:', timedelta(seconds=steps[-1][0]))
 
