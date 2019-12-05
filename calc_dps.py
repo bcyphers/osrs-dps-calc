@@ -5,19 +5,22 @@ from osrsbox import items_api, monsters_api
 def monster_complete(m):
     return m.defence_level >= 1 and m.hitpoints >= 1
 
-all_monsters = monsters_api.load()
-f2p_monsters = [m for m in all_monsters if not m.members and monster_complete(m)]
-monsters = {}
+api_monsters = monsters_api.load()
+f2p_monsters = [m for m in api_monsters if monster_complete(m)]
+monster_dict = {}
 for m in f2p_monsters:
-    if (m.name, m.combat_level) not in monsters:
-        monsters[(m.name, m.combat_level)] = m
-monsters = list(monsters.values())
+    if (m.name, m.combat_level) not in monster_dict:
+        monster_dict[(m.name, m.combat_level)] = m
+all_monsters = list(monster_dict.values())
 
 all_items = items_api.load()
 f2p_weapons = [i for i in all_items if i.weapon and (not i.members)
                and i.tradeable]
-weapons = [w for w in f2p_weapons if
-           any(s in w.name for s in ['scimitar'])]
+all_weapons = [w for w in f2p_weapons if
+               any(s in w.name.lower() for s in ['rune', 'adamant', 'mithril',
+                                                 'black', 'steel', 'iron']) and
+               any(s in w.name.lower() for s in ['dagger', 'sword', 'battleaxe',
+                                                 'scimitar', 'warhammer'])]
 
 cache = {}
 
@@ -100,13 +103,15 @@ def xp_rate(attack, strength, monster, weapon, stance):
 
 # For a given attack level, strength level, and training style, find the fastest
 # possible way to get to the next level
-def best_rate(attack, strength, aggressive):
+def best_rate(attack, strength, aggressive, monsters=all_monsters):
     best_rate = 0
     best_combo = None
 
-    for weapon in weapons:
-        if weapon.equipment.requirements and \
-                attack < weapon.equipment.requirements['attack']:
+    for weapon in all_weapons:
+        # make sure the player has the required levels to weild the weapon
+        if (weapon.equipment.requirements and
+            (attack < weapon.equipment.requirements.get('attack', 1) or
+             strength < weapon.equipment.requirements.get('strength', 1))):
             continue
 
         for stance in weapon.weapon.stances:
@@ -134,8 +139,8 @@ def xp_diff(lv1, lv2):
     return total
 
 
-def best_path(start_atk, start_str, end_atk, end_str):
-    best_paths = {(start_atk, start_str): (0, None, None)}
+def best_path(start_atk, start_str, end_atk, end_str, monsters=all_monsters):
+    best_paths = {(start_atk, start_str): (0, None, None, None)}
     q = [(start_atk, start_str)]
     seen = set()
     while q:
@@ -145,21 +150,22 @@ def best_path(start_atk, start_str, end_atk, end_str):
             break
 
         if a < end_atk:
-            atk_combo, atk_rate = best_rate(a, s, False)
+            atk_combo, atk_rate = best_rate(a, s, False, monsters)
             atk_cost = best_paths[(a, s)][0] + xp_req(a + 1) / atk_rate
             if (a + 1, s) not in best_paths or atk_cost < best_paths[(a + 1, s)][0]:
-                best_paths[(a + 1, s)] = (atk_cost, atk_combo, (a, s))
-
+                best_paths[(a + 1, s)] = (atk_cost, atk_combo,
+                                          (a, s), (a + 1, s))
 
             if (a+1, s) not in seen:
                 q.append((a+1, s))
                 seen.add((a+1, s))
 
         if s < end_str:
-            str_combo, str_rate = best_rate(a, s, True)
+            str_combo, str_rate = best_rate(a, s, True, monsters)
             str_cost = best_paths[(a, s)][0] + xp_req(s + 1) / str_rate
             if (a, s + 1) not in best_paths or str_cost < best_paths[(a, s + 1)][0]:
-                best_paths[(a, s + 1)] = (str_cost, str_combo, (a, s))
+                best_paths[(a, s + 1)] = (str_cost, str_combo,
+                                          (a, s), (a, s + 1))
 
             if (a, s + 1) not in seen:
                 q.append((a, s+1))
@@ -167,7 +173,7 @@ def best_path(start_atk, start_str, end_atk, end_str):
 
     path = [best_paths[(end_atk, end_str)]]
     while True:
-        tup = path[-1][-1]
+        tup = path[-1][2]
         if tup is None:
             break
         path.append(best_paths[tup])
@@ -177,13 +183,19 @@ def best_path(start_atk, start_str, end_atk, end_str):
     for i in range(1, len(steps)):
         td = timedelta(seconds=steps[i][0] - steps[i-1][0])
         if steps[i][1] != steps[i-1][1]:
-            phases.append([steps[i][1], steps[i][2], steps[i][2], td])
+            phases.append([steps[i][1], steps[i][2], steps[i][3], td])
         else:
-            phases[-1][2] = steps[i][2]
+            phases[-1][2] = steps[i][3]
             phases[-1][3] += td
 
     for p in phases:
-        print(p[0], p[1], p[2])
+        start, end = p[1], p[2]
+        if end[0] > start[0]:
+            message = 'attack from %d to %d' % (start[0], end[0])
+        else:
+            message = 'strength from %d to %d' % (start[1], end[1])
+
+        print(p[0], message, p[3])
 
     print('total time:', timedelta(seconds=steps[-1][0]))
 
