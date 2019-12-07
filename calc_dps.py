@@ -28,6 +28,22 @@ all_weapons = list(weapon_dict.values())
 
 cache = {}
 
+
+class Player(object):
+    def __init__(self, attack, strength, defence, weapon, head, body, legs,
+                 boots, hands, cape):
+        self.attack = attack
+        self.strength = strength
+        self.defence = defence
+        self.weapon = weapon
+        self.head = head
+        self.body = body
+        self.legs = legs
+        self.boots = boots
+        self.hands = hands
+        self.cape = cape
+
+
 """
 Calculate the expected number of hits to kill an enemy, given hit chance, max
 hit, and the enemy's HP.
