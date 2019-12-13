@@ -9,39 +9,103 @@ api_monsters = monsters_api.load()
 p2p_monsters = [m for m in api_monsters if monster_complete(m)]
 f2p_monsters = [m for m in api_monsters if monster_complete(m) and not m.members]
 monster_dict = {}
+
 for m in f2p_monsters:
     if (m.name.lower(), m.combat_level) not in monster_dict:
         monster_dict[(m.name.lower(), m.combat_level)] = m
+
 all_monsters = list(monster_dict.values())
 
+
+def valid_equipment(i):
+    return (not i.members and i.tradeable and not i.quest_item
+        and i.equipable_by_player and not i.placeholder and i.equipment
+        and i.highalch > 0)
+
+
 api_items = items_api.load()
-f2p_weapons = [i for i in api_items if i.weapon and (not i.members)
-               and i.tradeable]
+all_equipment = [i for i in api_items if valid_equipment(i)]
+
 weapon_dict = {}
-for w in f2p_weapons:
-    if any(s in w.name.lower() for s in ['rune', 'adamant', 'mithril',
-                                         'black', 'steel', 'iron']):
-        if any(s in w.name.lower() for s in ['dagger', 'sword', 'battleaxe',
-                                             'scimitar', 'warhammer']):
-            weapon_dict[w.name.lower()] = w
+for w in all_equipment:
+    if w.weapon:
+        if any(s in w.name.lower() for s in ['rune', 'adamant', 'mithril',
+                                             'black', 'steel', 'iron']):
+            if any(s in w.name.lower() for s in ['dagger', 'sword', 'battleaxe',
+                                                 'scimitar', 'warhammer']):
+                weapon_dict[w.name.lower()] = w
+
 all_weapons = list(weapon_dict.values())
+
+SLOTS = ['head', 'body', 'legs', 'feet', 'hands', 'cape', 'neck', 'ring',
+         'shield']
+
+STATS = ['attack_stab', 'attack_slash', 'attack_crush', 'attack_magic',
+         'attack_ranged', 'defence_stab', 'defence_slash', 'defence_crush',
+         'defence_magic', 'defence_ranged', 'melee_strength',
+         'ranged_strength', 'magic_damage', 'prayer']
+
+all_armor = {s: [] for s in SLOTS}
+
+for i in all_equipment:
+    if i.equipment.slot in SLOTS:
+        all_armor[i.equipment.slot].append(i)
 
 cache = {}
 
 
+class AttackStyle(object):
+    SLASH = 'slash'
+    STAB = 'stab'
+    CRUSH = 'crush'
+    MAGIC = 'magic'
+    RANGE = 'range'
+
+
+class ArmorSet(object):
+    def __init__(self, **kwargs):
+        for s in SLOTS:
+            setattr(self, s, kwargs.get(s))
+
+    def __str__(self):
+        slots = []
+        stats = {s: 0 for s in STATS}
+
+        for s in SLOTS:
+            item = getattr(self, s)
+            slots.append('%s: %s' % (s, item.name))
+            for st in STATS:
+                stats[st] += getattr(item.equipment, st)
+
+
+        return ", ".join(slots) + '\n' + ', '.join(['%s: %s' % i for i in
+                                                    stats.items()])
+
+
 class Player(object):
-    def __init__(self, attack, strength, defence, weapon, head, body, legs,
-                 boots, hands, cape):
+    def __init__(self, attack, strength, defence, ranged, magic, prayer):
         self.attack = attack
         self.strength = strength
         self.defence = defence
-        self.weapon = weapon
-        self.head = head
-        self.body = body
-        self.legs = legs
-        self.boots = boots
-        self.hands = hands
-        self.cape = cape
+        self.ranged = ranged
+        self.magic = magic
+        self.prayer = prayer
+
+
+def find_bis_armor(player, attack_style):
+    aset = {s: None for s in SLOTS}
+    for slot, items in all_armor.items():
+        eligible = []
+        for i in items:
+            if not i.equipment.requirements:
+                pass
+            for stat in ['defence', 'attack', 'strength', 'ranged', 'magic',
+                         'prayer']:
+                pass
+        attr = 'defence_' + attack_style
+        aset[slot] = max(items, key=lambda i: getattr(i.equipment, attr))
+
+    return ArmorSet(**aset)
 
 
 """
@@ -116,8 +180,6 @@ Find the expected xp per second of the given encounter.
 """
 def xp_rate(player, monster, weapon, stance):
     ettk = expected_ttk(player.attack, player.strength, monster, weapon, stance)
-
-    monster_dps = calc_dps(player.
 
     # add a delay for banking for new food
     if player.heal_rate < monster_dps:
