@@ -1,6 +1,8 @@
 import random
 from datetime import timedelta
+
 from osrsbox import items_api, monsters_api
+import matplotlib.pyplot as plt
 
 def monster_complete(m):
     return m.defence_level >= 1 and m.hitpoints >= 1
@@ -9,29 +11,27 @@ api_monsters = monsters_api.load()
 p2p_monsters = [m for m in api_monsters if monster_complete(m)]
 f2p_monsters = [m for m in api_monsters if monster_complete(m) and not m.members]
 monster_dict = {}
-for m in f2p_monsters:
+for m in p2p_monsters:
     if (m.name.lower(), m.combat_level) not in monster_dict:
         monster_dict[(m.name.lower(), m.combat_level)] = m
 all_monsters = list(monster_dict.values())
 
 api_items = items_api.load()
+p2p_weapons = [i for i in api_items if i.weapon]
 f2p_weapons = [i for i in api_items if i.weapon and (not i.members)
                and i.tradeable]
 weapon_dict = {}
-for w in f2p_weapons:
-    if any(s in w.name.lower() for s in ['rune', 'adamant', 'mithril',
-                                         'black', 'steel', 'iron']):
-        if any(s in w.name.lower() for s in ['dagger', 'sword', 'battleaxe',
-                                             'scimitar', 'warhammer']):
-            weapon_dict[w.name.lower()] = w
+for w in p2p_weapons:
+    weapon_dict[w.name.lower()] = w
 all_weapons = list(weapon_dict.values())
 
 cache = {}
 
 
 class Player(object):
-    def __init__(self, attack, strength, defence, weapon, head, body, legs,
-                 boots, hands, cape):
+    def __init__(self, attack=1, strength=1, defence=1, weapon=None, head=None,
+                 body=None, legs=None, boots=None, hands=None, cape=None,
+                 amulet=None, ring=None):
         self.attack = attack
         self.strength = strength
         self.defence = defence
@@ -42,34 +42,17 @@ class Player(object):
         self.boots = boots
         self.hands = hands
         self.cape = cape
+        self.amulet = amulet
+        self.ring = ring
 
 
-"""
-Calculate the expected number of hits to kill an enemy, given hit chance, max
-hit, and the enemy's HP.
-"""
-def expected_htk(hit_chance, max_hit, hp):
-    ehtk = []
+class Encounter(object):
+    def __init__(self, player, monster):
+        self.player = player
+        self.monster = monster
 
-    for i in range(1, hp + 1):
-        prevs = sum(ehtk[max(i - max_hit - 1, 0):])
-        res = (1 / hit_chance) + (1. / max_hit) * prevs
-        ehtk.append(res)
 
-    return ehtk[-1]
-
-KILL_DELAY = 3
-BANK_DELAY = 150
-
-"""
-Compute expected time to kill a monster given attack level, strength level,
-weapon, and weapon stance.
-"""
-def expected_ttk(attack, strength, monster, weapon, stance):
-    tup = (attack, strength, monster.id, weapon.id, stance['combat_style'])
-    if tup in cache:
-        return cache[tup]
-
+def get_atk_stats(attack, strength, enemy, weapon, stance):
     # Calculate strength and attack bonuses due to combat stance
     str_bonus = 0
     atk_bonus = 0
@@ -90,21 +73,82 @@ def expected_ttk(attack, strength, monster, weapon, stance):
     weapon_atk = getattr(weapon.equipment, "attack_" + stance['attack_type'])
     max_atk_roll = effective_atk * (weapon_atk + 64)
 
-    # Calculate the monster's max defence roll
-    monster_equip_bonus = getattr(monster, "defence_" + stance['attack_type'])
-    monster_def_roll =  (monster.defence_level + 9) * (monster_equip_bonus + 64)
+    # Calculate the enemy's max defence roll
+    enemy_equip_bonus = getattr(enemy, "defence_" + stance['attack_type'])
+    enemy_def_roll =  (enemy.defence_level + 9) * (enemy_equip_bonus + 64)
 
     # Calculate the chance of a hit (not a splash)
-    if max_atk_roll > monster_def_roll:
-        hit_chance = 1 - monster_def_roll / (2. * max_atk_roll)
+    if max_atk_roll > enemy_def_roll:
+        hit_chance = 1 - enemy_def_roll / (2. * max_atk_roll)
     else:
-        hit_chance = max_atk_roll / (3. * monster_def_roll)
+        hit_chance = max_atk_roll / (3. * enemy_def_roll)
 
-    # Calculate how long it should take to kill one monster
-    expected_ttk = expected_htk(hit_chance, max_hit, monster.hitpoints) * \
-        weapon.weapon.attack_speed * 0.6
+    print('max hit: %d, hit chance: %.3f' % (max_hit, hit_chance))
 
-    # add a delay for finding, targeting a new monster
+    return hit_chance, max_hit
+
+"""
+Calculate the expected number of hits to kill an enemy, given hit chance, max
+hit, and the enemy's HP.
+"""
+def expected_htk(hit_chance, max_hit, hp):
+    ehtk = []
+
+    for i in range(1, hp + 1):
+        prevs = sum(ehtk[max(i - max_hit - 1, 0):])
+        res = (1 / hit_chance) + (1. / max_hit) * prevs
+        ehtk.append(res)
+
+    return ehtk[-1]
+
+
+def simulate_htk(hit_chance, max_hit, hp, n=10000):
+    res = []
+    for i in range(n):
+        health = hp
+        hits = 0
+        while health > 0:
+            hits += 1
+            if random.random() < hit_chance:
+                health -= random.randint(1, max_hit)
+
+        res.append(hits)
+
+    plt.hist(res)
+    plt.show()
+
+    mean = sum(res) / float(n)
+    ranked = sorted(res)
+    med = ranked[n//2]
+    low_bound = ranked[n//20]
+    hi_bound = ranked[-n//20]
+
+    print('%d < %d < %d' % (low_bound, med, hi_bound))
+    return mean
+
+
+KILL_DELAY = 3
+BANK_DELAY = 150
+
+"""
+Compute expected time to kill a enemy given attack level, strength level,
+weapon, and weapon stance.
+"""
+def expected_ttk(attack, strength, enemy, weapon, stance):
+    tup = (attack, strength, enemy.id, weapon.id, stance['combat_style'])
+    if tup in cache:
+        return cache[tup]
+
+    hit_chance, max_hit = get_atk_stats(attack, strength, enemy, weapon, stance)
+
+    # Calculate how long it should take to kill one enemy
+    ehtk = expected_htk(hit_chance, max_hit, enemy.hitpoints)
+    expected_ttk = ehtk * weapon.weapon.attack_speed * 0.6
+
+    shtk = simulate_htk(hit_chance, max_hit, enemy.hitpoints)
+    print('computed: %.1f, simulated: %.1f' % (ehtk, shtk))
+
+    # add a delay for finding, targeting a new enemy
     expected_ttk += KILL_DELAY
 
     cache[tup] = expected_ttk
@@ -117,12 +161,12 @@ Find the expected xp per second of the given encounter.
 def xp_rate(player, monster, weapon, stance):
     ettk = expected_ttk(player.attack, player.strength, monster, weapon, stance)
 
-    monster_dps = calc_dps(player.
+    monster_dps = calc
 
     # add a delay for banking for new food
     if player.heal_rate < monster_dps:
         monsters_per_bank = player_hp / expected_ttk * (monster_dps - player_heal_rate)
-        expected_ttk += BANK_DELAY / monsters_per_bank
+        ettk += BANK_DELAY / monsters_per_bank
 
     ev = monster.hitpoints * 4. / ettk
 
@@ -135,18 +179,20 @@ def best_rate(attack, strength, aggressive, monsters=all_monsters):
     best_rate = 0
     best_combo = None
 
+    player = Player(attack=attack, strength=strength)
+
     for weapon in all_weapons:
         # make sure the player has the required levels to weild the weapon
         if (weapon.equipment.requirements and
-            (attack < weapon.equipment.requirements.get('attack', 1) or
-             strength < weapon.equipment.requirements.get('strength', 1))):
+            (player.attack < weapon.equipment.requirements.get('attack', 1) or
+             player.strength < weapon.equipment.requirements.get('strength', 1))):
             continue
 
         for stance in weapon.weapon.stances:
             if (aggressive and stance['experience'] == 'strength' or
                 (not aggressive) and stance['experience'] == 'attack'):
                 for monster in monsters:
-                    rate = xp_rate(attack, strength, monster, weapon, stance)
+                    rate = xp_rate(player, monster, weapon, stance)
                     if rate > best_rate:
                         best_rate = rate
                         best_combo = (weapon.name, stance['combat_style'],
