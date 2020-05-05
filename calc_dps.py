@@ -305,52 +305,73 @@ def expected_htk(hit_chance, max_hit, hp):
     return ehtk[-1]
 
 
-def simulate_htk(hit_chance, max_hit, hp, n=10000):
-    res = []
-    for i in range(n):
-        health = hp
-        hits = 0
-        while health > 0:
-            hits += 1
-            if random.random() < hit_chance:
-                health -= random.randint(1, max_hit)
+def convolve(d1, d2, cap=None):
+    if cap is not None:
+        res_len = min(cap, len(d1) + len(d2) - 1)
+    else:
+        res_len = len(d1) + len(d2) - 1
 
-        res.append(hits)
+    results = np.zeros(res_len)
+    for i in range(len(d1)):
+        for j in range(len(d2)):
+            rix = min(i + j, len(results) - 1)
+            results[rix] += d1[i] * d2[j]
 
-    plt.hist(res, bins=np.arange(max(res) + 2))
+    return results
+
+
+def simulate_htk(hit_chance, max_hit, hp):
+    probs = [1 - hit_chance] + [hit_chance / max_hit] * max_hit
+    n_hit_dist = [probs]
+    last = probs
+    res = [0]
+    while len(last) <= hp or sum(res) < 0.9999:
+        n_hit_dist.append(convolve(last[:hp], probs, hp + 1))
+        last = n_hit_dist[-1]
+        if len(last) <= hp:
+            res.append(0)
+        else:
+            res.append(last[hp])
+
+    plt.bar(range(len(res)), res)
     plt.show()
 
-    mean = sum(res) / float(n)
-    ranked = sorted(res)
-    med = ranked[n//2]
-    low_bound = ranked[n//20]
-    hi_bound = ranked[-n//20]
+    return res
+
+
+def simulate_damage(hit_chance, max_hit, hit_probs):
+    probs = [1 - hit_chance] + [hit_chance / max_hit] * max_hit
+    n_hit_dist = [probs]
+    for i in range(len(hit_probs) - 1):
+        n_hit_dist.append(convolve(n_hit_dist[-1], probs))
+
+    print(sum(hit_probs))
+    print(len(n_hit_dist[-1]))
+
+    res = np.zeros(len(n_hit_dist[-1]))
+    for i, p in enumerate(hit_probs):
+        res += p * np.append(n_hit_dist[i],
+                             np.zeros(len(res) - len(n_hit_dist[i])))
+
+    mean = 0
+    for i in range(len(res)):
+        mean += i * res[i]
+
+    cdf = [sum(res[:i+1]) for i in range(len(res))]
+    med = next(i for i, x in enumerate(cdf) if x > 0.5)
+    low_bound = next(i for i, x in enumerate(cdf) if x > 0.05)
+    hi_bound = next(i for i, x in enumerate(cdf) if x > 0.95)
+    hi_hi_bound = next(i for i, x in enumerate(cdf) if x > 0.9999)
+
+    print(cdf)
 
     print('%d < %d < %d' % (low_bound, med, hi_bound))
-    return mean
 
-
-def simulate_damage(hit_chance, max_hit, hits, n=10000):
-    res = []
-    for i in range(n):
-        dmg = 0
-        for j in range(hits):
-            if random.random() < hit_chance:
-                dmg += random.randint(1, max_hit)
-        res.append(dmg)
-
-    plt.hist(res, bins=np.arange(max(res) + 2))
+    res = res[:hi_hi_bound]
+    plt.bar(range(len(res)), res)
     plt.show()
 
-    mean = sum(res) / float(n)
-    ranked = sorted(res)
-    med = ranked[n//2]
-    low_bound = ranked[n//20]
-    hi_bound = ranked[-n//20]
-
-    print('%d < %d < %d' % (low_bound, med, hi_bound))
     return mean
-
 
 
 KILL_DELAY = 3
@@ -370,9 +391,7 @@ def expected_ttk(player, enemy):
     # Calculate how long it should take to kill one enemy
     ehtk = expected_htk(hit_chance, max_hit, enemy.hitpoints)
     expected_ttk = ehtk * player.equip.weapon.weapon.attack_speed * 0.6
-
-    shtk = simulate_htk(hit_chance, max_hit, enemy.hitpoints)
-    print('computed htk: %.1f, simulated htk: %.1f' % (ehtk, shtk))
+    print('computed htk: %.1f' % ehtk)
 
     # add a delay for finding, targeting a new enemy
     expected_ttk += KILL_DELAY
@@ -381,16 +400,39 @@ def expected_ttk(player, enemy):
     return expected_ttk
 
 
-def expected_damage(player, enemy, time):
+def expected_dmg(player, enemy, time):
+    # now do the enemy
     hit_chance, max_hit = get_def_stats(player, enemy)
     dps = hit_chance * (max_hit + 1) / 2 / (enemy.attack_speed * 0.6)
     dmg = dps * time
 
-    sdmg = simulate_damage(hit_chance, max_hit,
-                           int(time / (enemy.attack_speed * 0.6)))
-    print('computed dmg: %.1f, simulated dmg: %.1f' % (dmg, sdmg))
-
     return dmg
+
+
+def simulate(player, enemy):
+    hit_chance, max_hit = get_atk_stats(player, enemy)
+    htk_weights = simulate_htk(hit_chance, max_hit, enemy.hitpoints)
+
+    # now do the enemy
+    hit_chance, max_hit = get_def_stats(player, enemy)
+
+    # convert player hits to enemy hits
+    tick_weights = []
+    p_speed = player.equip.weapon.weapon.attack_speed
+    for i, w in enumerate(htk_weights):
+        tick_weights.extend([(i, w)] * p_speed)
+
+    hit_weights = []
+    last_i = -1
+    for i in range(0, len(tick_weights), enemy.attack_speed):
+        if tick_weights[i][0] == last_i:
+            hit_weights[-1] = tick_weights[i][1]
+        else:
+            hit_weights.append(tick_weights[i][1])
+        last_i = tick_weights[i][0]
+
+    sdmg = simulate_damage(hit_chance, max_hit, hit_weights)
+    print('simulated dmg: %.1f' % sdmg)
 
 
 """
