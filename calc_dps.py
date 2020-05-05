@@ -20,8 +20,8 @@ all_monsters = list(monster_dict.values())
 
 
 def valid_equipment(i):
-    return (not i.quest_item and i.equipable_by_player and not i.placeholder
-            and i.equipment and i.highalch > 0)
+    return (not i.quest_item and i.equipable_by_player
+            and not i.placeholder and i.equipment)
 
 
 api_items = items_api.load()
@@ -35,19 +35,19 @@ for w in p2p_weapons:
 
 all_weapons = list(weapon_dict.values())
 
-SLOTS = ['head', 'body', 'legs', 'feet', 'hands', 'cape', 'neck', 'ring',
-         'shield']
+SLOTS = ['weapon', 'head', 'body', 'legs', 'feet', 'hands', 'cape', 'neck',
+         'ring', 'shield']
 
 STATS = ['attack_stab', 'attack_slash', 'attack_crush', 'attack_magic',
          'attack_ranged', 'defence_stab', 'defence_slash', 'defence_crush',
          'defence_magic', 'defence_ranged', 'melee_strength',
          'ranged_strength', 'magic_damage', 'prayer']
 
-all_armor = {s: [] for s in SLOTS}
+equipment_dict = {s: {} for s in SLOTS}
 
 for i in all_equipment:
     if i.equipment.slot in SLOTS:
-        all_armor[i.equipment.slot].append(i)
+        equipment_dict[i.equipment.slot][i.name.lower()] = i
 
 cache = {}
 
@@ -57,13 +57,145 @@ class AttackStyle(object):
     STAB = 'stab'
     CRUSH = 'crush'
     MAGIC = 'magic'
-    RANGE = 'range'
+    RANGED = 'ranged'
 
 
-class ArmorSet(object):
-    def __init__(self, **kwargs):
+class Player(object):
+    def __init__(self, attack=1, strength=1, defence=1, ranged=1, magic=1, prayer=1):
+        self.attack = attack
+        self.strength = strength
+        self.defence = defence
+        self.ranged = ranged
+        self.magic = magic
+        self.prayer = prayer
+
+
+class Encounter(object):
+    def __init__(self, player, monster):
+        self.player = player
+        self.monster = monster
+
+
+class NoWeapon(object):
+    def __init__(self):
+        self.attack_speed = 4
+        self.weapon_type = 'unarmed'
+        self.stances = [
+            {'combat_style': 'punch', 'attack_type': 'crush', 'attack_style':
+             'accurate', 'experience': 'attack', 'boosts': None},
+            {'combat_style': 'kick', 'attack_type': 'crush', 'attack_style':
+             'aggressive', 'experience': 'strength', 'boosts': None},
+            {'combat_style': 'block', 'attack_type': 'crush', 'attack_style':
+             'defensive', 'experience': 'defence', 'boosts': None}
+        ]
+
+
+class NoEquip(object):
+    def __init__(self, slot):
+        self.attack_slash = 0
+        self.attack_stab = 0
+        self.attack_crush = 0
+        self.attack_ranged = 0
+        self.attack_magic = 0
+
+        self.defence_slash = 0
+        self.defence_stab = 0
+        self.defence_crush = 0
+        self.defence_ranged = 0
+        self.defence_magic = 0
+
+        self.melee_strength = 0
+        self.ranged_strength = 0
+        self.magic_damage = 0
+
+        self.prayer = 0
+        self.slot = slot
+        self.requirements = {}
+
+
+class NoItem(object):
+    def __init__(self, slot):
+        self.equipment = NoEquip(slot)
+        if slot == 'weapon':
+            self.weapon = NoWeapon()
+
+
+class Equipment(object):
+    def __init__(self, stance, **kwargs):
+        """
+        stance: int, index into the weapon's stances array
+        """
         for s in SLOTS:
-            setattr(self, s, kwargs.get(s))
+            item = kwargs.get(s)
+
+            if not item:
+                item = NoItem(s)
+            elif type(item) == str:
+                if s == 'weapon':
+                    item = weapon_dict[item]
+                else:
+                    item = equipment_dict[s][item]
+
+            setattr(self, s, item)
+
+        self.stance = self.weapon.weapon.stances[stance]
+
+    def get_attack_roll(self, attack):
+        atk_bonus = 0
+        if self.stance['attack_style'] == 'accurate':
+            atk_bonus = 3
+        elif self.stance['attack_style'] == 'controlled':
+            atk_bonus = 1
+
+        # Calculate the player's max attack roll
+        effective_atk = attack + atk_bonus + 8
+        equip_atk = 0
+        for s in SLOTS:
+            equip = getattr(self, s)
+            equip_atk += getattr(equip.equipment, "attack_" + self.stance['attack_type'])
+
+        return effective_atk * (equip_atk + 64)
+
+    def get_max_hit(self, strength):
+        str_bonus = 0
+        if self.stance['attack_style'] == 'controlled':
+            str_bonus = 1
+        elif self.stance['attack_style'] == 'aggressive':
+            str_bonus = 3
+
+        # Calculate the player's max hit
+        effective_str = strength + str_bonus + 8
+        equip_str = 0
+        for s in SLOTS:
+            equip = getattr(self, s)
+            equip_str += equip.equipment.melee_strength
+
+        return int(0.5 + effective_str * (equip_str + 64) / 640)
+
+    def get_defence_roll(self, defence, attack_type):
+        def_bonus = 0
+        if self.stance['attack_style'] == 'controlled':
+            def_bonus = 1
+        elif self.stance['attack_style'] == 'defensive':
+            def_bonus = 3
+
+        effective_def = defence + def_bonus + 8
+
+        equip_def = 0
+        for s in SLOTS:
+            equip = getattr(self, s)
+
+            # This workaround is here because some wiki entries only have
+            # "melee" for attack style.
+            if attack_type == 'melee':
+                mdef = 0
+                for t in ['slash', 'stab', 'crush']:
+                    mdef += getattr(equip.equipment, "defence_" + t)
+                equip_def += mdef / 3
+            else:
+                equip_def += getattr(equip.equipment, "defence_" + attack_type)
+
+        return effective_def * (equip_def + 64)
 
     def __str__(self):
         slots = []
@@ -80,14 +212,58 @@ class ArmorSet(object):
                                                     stats.items()])
 
 
-class Player(object):
-    def __init__(self, attack, strength, defence, ranged, magic, prayer):
-        self.attack = attack
-        self.strength = strength
-        self.defence = defence
-        self.ranged = ranged
-        self.magic = magic
-        self.prayer = prayer
+def get_atk_stats(player, equipment, enemy):
+    max_hit = equipment.get_max_hit(player.strength)
+    atk_roll = equipment.get_attack_roll(player.attack)
+
+    # Calculate the enemy's max defence roll
+    enemy_equip_bonus = getattr(enemy, "defence_" + equipment.stance['attack_type'])
+    def_roll =  (enemy.defence_level + 9) * (enemy_equip_bonus + 64)
+
+    # Calculate the chance of a hit (not a splash)
+    if atk_roll > def_roll:
+        hit_chance = 1 - def_roll / (2. * atk_roll)
+    else:
+        hit_chance = atk_roll / (3. * def_roll)
+
+    print('max hit: %d, hit chance: %.3f' % (max_hit, hit_chance))
+
+    return hit_chance, max_hit
+
+
+def get_def_stats(player, equipment, enemy):
+    for t in enemy.attack_type:
+        if t == 'typeless':
+            continue
+        elif t == 'curse':
+            continue
+        elif t == 'dragonfire':
+            continue
+        elif t == 'ranged':
+            continue
+        elif t == 'magic':
+            continue
+
+        if t in ['melee', 'slash', 'stab', 'crush']:
+            # Calculate the enemy's max hit
+            max_hit = int(0.5 + (enemy.strength_level + 9) * (enemy.melee_strength + 64) / 640)
+
+            # Calculate the enemy's max attack roll
+            equip_bonus = getattr(enemy, "attack_" + t, 0) + enemy.attack_accuracy
+            atk_roll = (enemy.attack_level + 9) * (equip_bonus + 64)
+
+            # player's max defence roll
+            def_roll = equipment.get_defence_roll(player.defence, t)
+
+        # Calculate the chance of a hit (not a splash)
+        if atk_roll > def_roll:
+            hit_chance = 1 - def_roll / (2. * atk_roll)
+        else:
+            hit_chance = atk_roll / (3. * def_roll)
+
+        print('%s: max hit: %d, hit chance: %.3f' % (t, max_hit, hit_chance))
+
+    return hit_chance, max_hit
 
 
 def find_bis_armor(player, attack_style):
@@ -103,49 +279,8 @@ def find_bis_armor(player, attack_style):
         attr = 'defence_' + attack_style
         aset[slot] = max(items, key=lambda i: getattr(i.equipment, attr))
 
-    return ArmorSet(**aset)
+    return Equipment(**aset)
 
-
-class Encounter(object):
-    def __init__(self, player, monster):
-        self.player = player
-        self.monster = monster
-
-
-def get_atk_stats(attack, strength, enemy, weapon, stance):
-    # Calculate strength and attack bonuses due to combat stance
-    str_bonus = 0
-    atk_bonus = 0
-    if stance['attack_style'] == 'accurate':
-        atk_bonus = 3
-    elif stance['attack_style'] == 'controlled':
-        str_bonus = 1
-        atk_bonus = 1
-    elif stance['attack_style'] == 'aggressive':
-        str_bonus = 3
-
-    # Calculate the player's max hit
-    effective_str = strength + str_bonus + 8
-    max_hit = int(0.5 + effective_str * (weapon.equipment.melee_strength + 64) / 640)
-
-    # Calculate the player's max attack roll
-    effective_atk = attack + atk_bonus + 8
-    weapon_atk = getattr(weapon.equipment, "attack_" + stance['attack_type'])
-    max_atk_roll = effective_atk * (weapon_atk + 64)
-
-    # Calculate the enemy's max defence roll
-    enemy_equip_bonus = getattr(enemy, "defence_" + stance['attack_type'])
-    enemy_def_roll =  (enemy.defence_level + 9) * (enemy_equip_bonus + 64)
-
-    # Calculate the chance of a hit (not a splash)
-    if max_atk_roll > enemy_def_roll:
-        hit_chance = 1 - enemy_def_roll / (2. * max_atk_roll)
-    else:
-        hit_chance = max_atk_roll / (3. * enemy_def_roll)
-
-    print('max hit: %d, hit chance: %.3f' % (max_hit, hit_chance))
-
-    return hit_chance, max_hit
 
 """
 Calculate the expected number of hits to kill an enemy, given hit chance, max
@@ -194,16 +329,16 @@ BANK_DELAY = 150
 Compute expected time to kill a enemy given attack level, strength level,
 weapon, and weapon stance.
 """
-def expected_ttk(attack, strength, enemy, weapon, stance):
-    tup = (attack, strength, enemy.id, weapon.id, stance['combat_style'])
-    if tup in cache:
-        return cache[tup]
+def expected_ttk(player, equipment, enemy):
+    #tup = (attack, strength, enemy.id, weapon.id, stance['combat_style'])
+    #if tup in cache:
+        #return cache[tup]
 
-    hit_chance, max_hit = get_atk_stats(attack, strength, enemy, weapon, stance)
+    hit_chance, max_hit = get_atk_stats(player, equipment, enemy)
 
     # Calculate how long it should take to kill one enemy
     ehtk = expected_htk(hit_chance, max_hit, enemy.hitpoints)
-    expected_ttk = ehtk * weapon.weapon.attack_speed * 0.6
+    expected_ttk = ehtk * equipment.weapon.weapon.attack_speed * 0.6
 
     shtk = simulate_htk(hit_chance, max_hit, enemy.hitpoints)
     print('computed: %.1f, simulated: %.1f' % (ehtk, shtk))
@@ -211,15 +346,21 @@ def expected_ttk(attack, strength, enemy, weapon, stance):
     # add a delay for finding, targeting a new enemy
     expected_ttk += KILL_DELAY
 
-    cache[tup] = expected_ttk
+    #cache[tup] = expected_ttk
     return expected_ttk
+
+
+def expected_damage(player, equipment, enemy, time):
+    hit_chance, max_hit = get_def_stats(player, equipment, enemy)
+    dps = hit_chance * (max_hit + 1) / 2 / (enemy.attack_speed * 0.6)
+    return dps * time
 
 
 """
 Find the expected xp per second of the given encounter.
 """
-def xp_rate(player, monster, weapon, stance):
-    ettk = expected_ttk(player.attack, player.strength, monster, weapon, stance)
+def xp_rate(player, equipment, monster):
+    ettk = expected_ttk(player, equipment, monster)
 
     # TODO below here
     monster_dps = calc_dps()
