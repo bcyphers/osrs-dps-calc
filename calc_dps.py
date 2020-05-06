@@ -220,6 +220,13 @@ class Encounter(object):
         self.monster = monster
 
 
+###########################################################
+## Basic encounter calculators
+###########################################################
+
+"""
+Find out the player's max hit and hit chance versus a specific enemy.
+"""
 def get_atk_stats(player, enemy):
     max_hit = player.get_max_hit()
     atk_roll = player.get_attack_roll()
@@ -239,6 +246,9 @@ def get_atk_stats(player, enemy):
     return hit_chance, max_hit
 
 
+"""
+Find out an enemy's max hit and hit chance versus a player.
+"""
 def get_def_stats(player, enemy):
     for t in enemy.attack_type:
         if t == 'typeless':
@@ -274,85 +284,95 @@ def get_def_stats(player, enemy):
     return hit_chance, max_hit
 
 
-def find_bis_armor(player, attack_style):
-    aset = {s: None for s in SLOTS}
-    for slot, items in all_armor.items():
-        eligible = []
-        for i in items:
-            if not i.equipment.requirements:
-                pass
-            for stat in ['defence', 'attack', 'strength', 'ranged', 'magic',
-                         'prayer']:
-                pass
-        attr = 'defence_' + attack_style
-        aset[slot] = max(items, key=lambda i: getattr(i.equipment, attr))
+###########################################################
+## Deep probability estimators
+###########################################################
 
-    return Equipment(**aset)
-
-
-"""
-Calculate the expected number of hits to kill an enemy, given hit chance, max
-hit, and the enemy's HP.
-"""
-def expected_htk(hit_chance, max_hit, hp):
-    ehtk = []
-
-    for i in range(1, hp + 1):
-        prevs = sum(ehtk[max(i - max_hit - 1, 0):])
-        res = (1 / hit_chance) + (1. / max_hit) * prevs
-        ehtk.append(res)
-
-    return ehtk[-1]
-
-
-def convolve(d1, d2, cap=None):
+def convolve(a, b, cap=None):
+    # the result will either be the sum of the vector lengths or the cap,
+    # whichever is less
     if cap is not None:
-        res_len = min(cap, len(d1) + len(d2) - 1)
+        res_len = min(cap, len(a) + len(b) - 1)
     else:
-        res_len = len(d1) + len(d2) - 1
+        res_len = len(a) + len(b) - 1
 
     results = np.zeros(res_len)
-    for i in range(len(d1)):
-        for j in range(len(d2)):
-            rix = min(i + j, len(results) - 1)
-            results[rix] += d1[i] * d2[j]
+    for i in range(len(a)):
+        for j in range(len(b)):
+            # the cap is going to be the max hp of a monster. so all
+            # values that fall above that cap can be squished into the last box
+            rix = min(i + j, res_len - 1)
+            results[rix] += a[i] * b[j]
 
     return results
 
 
 def simulate_htk(hit_chance, max_hit, hp):
+    # this is the per-hit damage probability dist
     probs = [1 - hit_chance] + [hit_chance / max_hit] * max_hit
-    n_hit_dist = [probs]
-    last = probs
+
+    # there is a 100% probability that 0 damage will have been done before the
+    # first hit
+    last = [1]
+
+    # this array has the probability distribution for the total amount of damage
+    # done after each hit. n_hit_dist[i][j] is the probability that exactly j
+    # damage has been done after the ith hit
+    n_hit_dist = [last]
+
+    # res[i] is the probability that the ith hit ends the fight
     res = [0]
-    while len(last) <= hp or sum(res) < 0.9999:
-        n_hit_dist.append(convolve(last[:hp], probs, hp + 1))
-        last = n_hit_dist[-1]
+
+    # do this until we are 99.99% sure we have killed the enemy (it's always
+    # possible that you splat forever)
+    while sum(res) < 0.9999:
+        # convolve the last set of probabilities that we didn't get lethal with
+        # the damage probabilities for the next hit
+        last = convolve(last[:hp], probs, cap=(hp + 1))
+        n_hit_dist.append(last)
+
+        # if the newest dist has a value in the `hp`th index, then there's a
+        # chance that the fight is over. add it to the result
         if len(last) <= hp:
             res.append(0)
         else:
             res.append(last[hp])
 
+    # let's see it
     plt.bar(range(len(res)), res)
     plt.show()
 
     return res
 
 
+"""
+hit_chance: probability that a hit will not splash
+max_hit: max hit
+hit_probs: for each index N, probability that this fight will last exactly N hits
+"""
 def simulate_damage(hit_chance, max_hit, hit_probs):
+    # index = damage, value = probability of that much damage in one hit
     probs = [1 - hit_chance] + [hit_chance / max_hit] * max_hit
+
+    # index = number of hits, value = distribution of total damage done
     n_hit_dist = [probs]
+
+    # create the n_hit_dist matrix by convolving the hit probability vector over
+    # and over
     for i in range(len(hit_probs) - 1):
         n_hit_dist.append(convolve(n_hit_dist[-1], probs))
 
-    print(sum(hit_probs))
-    print(len(n_hit_dist[-1]))
-
+    # result vector will be as long as the longest hit distribution (the last
+    # one)
     res = np.zeros(len(n_hit_dist[-1]))
-    for i, p in enumerate(hit_probs):
-        res += p * np.append(n_hit_dist[i],
-                             np.zeros(len(res) - len(n_hit_dist[i])))
 
+    # weight each hit dist vector by how likely it is to be the last one
+    for i, p in enumerate(hit_probs):
+        padded_hit_dist = np.append(n_hit_dist[i],
+                                    np.zeros(len(res) - len(n_hit_dist[i])))
+        res += p * padded_hit_dist
+
+    # the mean damage value should just be the sum of the weighted values
     mean = 0
     for i in range(len(res)):
         mean += i * res[i]
@@ -363,19 +383,106 @@ def simulate_damage(hit_chance, max_hit, hit_probs):
     hi_bound = next(i for i, x in enumerate(cdf) if x > 0.95)
     hi_hi_bound = next(i for i, x in enumerate(cdf) if x > 0.9999)
 
-    print(cdf)
+    print('mean simulated damage: %.1f' % mean)
+    print('medians: %d (5%%) < %d (50%%) < %d (95%%)' %
+          (low_bound, med, hi_bound))
 
-    print('%d < %d < %d' % (low_bound, med, hi_bound))
-
-    res = res[:hi_hi_bound]
-    plt.bar(range(len(res)), res)
+    # cut off the very unlikely high values and lump them together
+    out = res[:hi_hi_bound]
+    np.append(out, sum(res[hi_hi_bound:]))
+    plt.bar(range(len(out)), out)
     plt.show()
 
-    return mean
+    return out
 
+
+"""
+Figure out the exact(ish) distribution of (1) hits to kill the enemy and (2)
+damage done by the enemy
+"""
+def simulate(player, enemy, aggro=True):
+    # get player's hit chance and max hit
+    hit_chance, max_hit = get_atk_stats(player, enemy)
+
+    # calculate the distribution of the number of hits the player will take to
+    # kill the enemy (in the form of a discrete probability distribution function)
+    htk_pdf = simulate_htk(hit_chance, max_hit, enemy.hitpoints)
+
+    # now do the enemy's max hit and hit chance
+    hit_chance, max_hit = get_def_stats(player, enemy)
+
+    # Now we need to convert player hits to enemy hits. In other words, in the
+    # time it takes the player to get off X hits, the enemy can get off Y hits.
+
+    # first, convert the hits-to-kill PDF to a ticks-to-kill cumulative
+    # distribution function (CDF). This will have a lot of duplicates.
+    tick_cdf = []
+    p_speed = player.equip.weapon.weapon.attack_speed
+    htk_cdf = [sum(htk_pdf[:i]) for i in range(len(htk_pdf))]
+    for w in htk_cdf:
+        tick_cdf.extend([w] * p_speed)
+
+    # next convert the per-tick CDF to a per-monster-hit CDF. The numbers in
+    # hit_cdf are the probability that the fight has ended before the Nth hit by
+    # the monster.
+
+    # if the enemy started the fight, they have a head start
+    if aggro:
+        start = 0
+    else:
+        start = p_speed + p
+
+    # pull out the cdf values for the relevant ticks
+    hit_cdf = tick_cdf[start::enemy.attack_speed]
+
+    # finally, convert this CDF to a PDF which represents the probability that a
+    # monster will get exactly N hits on the player during the fight (the index
+    # is N).
+    hit_pdf = []
+    for i, cur_p in enumerate(hit_cdf):
+        if i + 1 < len(hit_cdf):
+            # this is the probability that the fight will have ended after the
+            # next tick
+            next_p = hit_cdf[i+1]
+        else:
+            next_p = 1
+
+        # we're looking for the difference between the cdf on this hit and
+        # the cdf on the next hit
+        hit_pdf.append(next_p - cur_p)
+
+    # now pass this distribution into the damage simulator to figure out how
+    # much the enemy is likely to damage the player during their fight.
+    dmg_pdf = simulate_damage(hit_chance, max_hit, hit_pdf)
+
+    return htk_pdf, dmg_pdf
+
+
+###########################################################
+## Expected value estimators (fast)
+###########################################################
 
 KILL_DELAY = 3
 BANK_DELAY = 150
+
+"""
+Calculate the expected number of hits to kill an enemy, given hit chance, max
+hit, and the enemy's HP.
+"""
+def expected_htk(hit_chance, max_hit, hp):
+    # each element in the array will be the expected number of hits to do at
+    # least that much damage. e.g. ehtk[0] => the number of hits expected to do
+    # at least 1 damage.
+    ehtk = []
+
+    for i in range(hp):
+        prevs = ehtk[max(i - max_hit, 0):]
+        res = (1 / hit_chance) + (1. / max_hit) * sum(prevs)
+        ehtk.append(res)
+
+    # the last value in the array is the expected number of hits to kill
+    return ehtk[-1]
+
 
 """
 Compute expected time to kill a enemy given attack level, strength level,
@@ -391,7 +498,7 @@ def expected_ttk(player, enemy):
     # Calculate how long it should take to kill one enemy
     ehtk = expected_htk(hit_chance, max_hit, enemy.hitpoints)
     expected_ttk = ehtk * player.equip.weapon.weapon.attack_speed * 0.6
-    print('computed htk: %.1f' % ehtk)
+    print('computed htk: %.1f, ttk: %.1f s' % (ehtk, expected_ttk))
 
     # add a delay for finding, targeting a new enemy
     expected_ttk += KILL_DELAY
@@ -400,39 +507,22 @@ def expected_ttk(player, enemy):
     return expected_ttk
 
 
-def expected_dmg(player, enemy, time):
-    # now do the enemy
+"""
+Compute the expected amount of damage an enemy will do to a player before the
+player can kill it
+"""
+def expected_dmg(player, enemy, time, aggro=True):
+
+    # what are the enemy's max hit and hit chance against the player?
     hit_chance, max_hit = get_def_stats(player, enemy)
+
+    # compute enemy DPS
     dps = hit_chance * (max_hit + 1) / 2 / (enemy.attack_speed * 0.6)
+
+    # if the enemy attacks the player, it gets a small time advantage
     dmg = dps * time
 
     return dmg
-
-
-def simulate(player, enemy):
-    hit_chance, max_hit = get_atk_stats(player, enemy)
-    htk_weights = simulate_htk(hit_chance, max_hit, enemy.hitpoints)
-
-    # now do the enemy
-    hit_chance, max_hit = get_def_stats(player, enemy)
-
-    # convert player hits to enemy hits
-    tick_weights = []
-    p_speed = player.equip.weapon.weapon.attack_speed
-    for i, w in enumerate(htk_weights):
-        tick_weights.extend([(i, w)] * p_speed)
-
-    hit_weights = []
-    last_i = -1
-    for i in range(0, len(tick_weights), enemy.attack_speed):
-        if tick_weights[i][0] == last_i:
-            hit_weights[-1] = tick_weights[i][1]
-        else:
-            hit_weights.append(tick_weights[i][1])
-        last_i = tick_weights[i][0]
-
-    sdmg = simulate_damage(hit_chance, max_hit, hit_weights)
-    print('simulated dmg: %.1f' % sdmg)
 
 
 """
@@ -450,6 +540,32 @@ def xp_rate(player, monster):
         ettk += BANK_DELAY / monsters_per_bank
 
     ev = monster.hitpoints * 4. / ettk
+
+
+###########################################################
+## Optimizers
+###########################################################
+
+"""
+Find the best equipment available for a player with a given set of stats and
+attack style (slash, crush, stab, range, or mage)
+
+TODO
+"""
+def find_bis_armor(player, attack_style):
+    aset = {s: None for s in SLOTS}
+    for slot, items in all_armor.items():
+        eligible = []
+        for i in items:
+            if not i.equipment.requirements:
+                pass
+            for stat in ['defence', 'attack', 'strength', 'ranged', 'magic',
+                         'prayer']:
+                pass
+        attr = 'defence_' + attack_style
+        aset[slot] = max(items, key=lambda i: getattr(i.equipment, attr))
+
+    return Equipment(**aset)
 
 
 """
