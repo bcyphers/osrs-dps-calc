@@ -22,7 +22,25 @@ all_monsters = list(monster_dict.values())
 
 def valid_equipment(i):
     return (not i.quest_item and i.equipable_by_player
-            and not i.placeholder and i.equipment)
+            and not i.placeholder and i.equipment and i.highalch is not None)
+
+SLOTS = ['weapon', 'head', 'body', 'legs', 'feet', 'hands', 'cape', 'neck',
+         'ring', 'shield']
+
+STATS = ['attack_stab', 'attack_slash', 'attack_crush', 'attack_magic',
+         'attack_ranged', 'defence_stab', 'defence_slash', 'defence_crush',
+         'defence_magic', 'defence_ranged', 'melee_strength',
+         'ranged_strength', 'magic_damage', 'prayer']
+
+PLAYER_SKILLS = [
+    'attack',
+    'strength',
+    'defence',
+    'ranged',
+    'magic',
+    'prayer',
+    'hitpoints',
+]
 
 
 api_items = items_api.load()
@@ -35,14 +53,6 @@ for w in p2p_weapons:
     weapon_dict[w.name.lower()] = w
 
 all_weapons = list(weapon_dict.values())
-
-SLOTS = ['weapon', 'head', 'body', 'legs', 'feet', 'hands', 'cape', 'neck',
-         'ring', 'shield']
-
-STATS = ['attack_stab', 'attack_slash', 'attack_crush', 'attack_magic',
-         'attack_ranged', 'defence_stab', 'defence_slash', 'defence_crush',
-         'defence_magic', 'defence_ranged', 'melee_strength',
-         'ranged_strength', 'magic_damage', 'prayer']
 
 equipment_dict = {s: {} for s in SLOTS}
 
@@ -142,18 +152,28 @@ class Equipment(object):
 
 class Player(object):
     def __init__(self, attack=1, strength=1, defence=1, ranged=1, magic=1,
-                 prayer=1, equipment=None):
+                 prayer=1, hitpoints=10, equipment=None):
         self.attack = attack
         self.strength = strength
         self.defence = defence
         self.ranged = ranged
         self.magic = magic
         self.prayer = prayer
+        self.hitpoints = hitpoints
 
         if equipment is None:
             equipment = Equipment(0)
 
         self.equip = equipment
+
+    def can_equip(self, gear):
+        reqs = gear.equipment.requirements
+        if reqs:
+            for level in PLAYER_SKILLS:
+                if getattr(self, level) < reqs.get(level, 1):
+                    return False
+
+        return True
 
     def get_attack_roll(self):
         atk_bonus = 0
@@ -241,8 +261,6 @@ def get_atk_stats(player, enemy):
     else:
         hit_chance = atk_roll / (3. * def_roll)
 
-    print('max hit: %d, hit chance: %.3f' % (max_hit, hit_chance))
-
     return hit_chance, max_hit
 
 
@@ -250,6 +268,9 @@ def get_atk_stats(player, enemy):
 Find out an enemy's max hit and hit chance versus a player.
 """
 def get_def_stats(player, enemy):
+    hit_chance = None
+    max_hit = None
+
     for t in enemy.attack_type:
         if t == 'typeless':
             continue
@@ -278,8 +299,6 @@ def get_def_stats(player, enemy):
             hit_chance = 1 - def_roll / (2. * atk_roll)
         else:
             hit_chance = atk_roll / (3. * def_roll)
-
-        print('%s: max hit: %d, hit chance: %.3f' % (t, max_hit, hit_chance))
 
     return hit_chance, max_hit
 
@@ -404,12 +423,16 @@ def simulate(player, enemy, aggro=True):
     # get player's hit chance and max hit
     hit_chance, max_hit = get_atk_stats(player, enemy)
 
+    print('player max hit: %d, hit chance: %.1f%%' % (max_hit, hit_chance * 100))
+
     # calculate the distribution of the number of hits the player will take to
     # kill the enemy (in the form of a discrete probability distribution function)
     htk_pdf = simulate_htk(hit_chance, max_hit, enemy.hitpoints)
 
     # now do the enemy's max hit and hit chance
     hit_chance, max_hit = get_def_stats(player, enemy)
+
+    print('enemy max hit: %d, hit chance: %.1f%%' % (max_hit, hit_chance * 100))
 
     # Now we need to convert player hits to enemy hits. In other words, in the
     # time it takes the player to get off X hits, the enemy can get off Y hits.
@@ -464,6 +487,7 @@ def simulate(player, enemy, aggro=True):
 
 KILL_DELAY = 3
 BANK_DELAY = 150
+PLAYER_HEAL_RATE = 1. / 60
 
 """
 Calculate the expected number of hits to kill an enemy, given hit chance, max
@@ -497,14 +521,24 @@ def expected_ttk(player, enemy):
 
     # Calculate how long it should take to kill one enemy
     ehtk = expected_htk(hit_chance, max_hit, enemy.hitpoints)
-    expected_ttk = ehtk * player.equip.weapon.weapon.attack_speed * 0.6
-    print('computed htk: %.1f, ttk: %.1f s' % (ehtk, expected_ttk))
+    ettk = ehtk * player.equip.weapon.weapon.attack_speed * 0.6
 
     # add a delay for finding, targeting a new enemy
-    expected_ttk += KILL_DELAY
+    ettk += KILL_DELAY
 
-    #cache[tup] = expected_ttk
-    return expected_ttk
+    #cache[tup] = ettk
+    return ettk
+
+
+def expected_dps(player, enemy):
+    # what are the enemy's max hit and hit chance against the player?
+    hit_chance, max_hit = get_def_stats(player, enemy)
+
+    if hit_chance is None:
+        return None
+
+    # compute enemy DPS
+    return hit_chance * (max_hit + 1) / 2 / (enemy.attack_speed * 0.6)
 
 
 """
@@ -512,14 +546,9 @@ Compute the expected amount of damage an enemy will do to a player before the
 player can kill it
 """
 def expected_dmg(player, enemy, time, aggro=True):
+    dps = expected_dps(player, enemy)
 
-    # what are the enemy's max hit and hit chance against the player?
-    hit_chance, max_hit = get_def_stats(player, enemy)
-
-    # compute enemy DPS
-    dps = hit_chance * (max_hit + 1) / 2 / (enemy.attack_speed * 0.6)
-
-    # if the enemy attacks the player, it gets a small time advantage
+    # TODO: if the enemy attacks the player, it gets a small time advantage
     dmg = dps * time
 
     return dmg
@@ -528,18 +557,21 @@ def expected_dmg(player, enemy, time, aggro=True):
 """
 Find the expected xp per second of the given encounter.
 """
-def xp_rate(player, monster):
-    ettk = expected_ttk(player, monster)
+def xp_rate(player, enemy):
+    ettk = expected_ttk(player, enemy)
 
-    # TODO below here
-    monster_dps = calc_dps()
+    enemy_dps = expected_dps(player, enemy)
+    if enemy_dps is None:
+        return 0
 
     # add a delay for banking for new food
-    if player.heal_rate < monster_dps:
-        monsters_per_bank = player_hp / expected_ttk * (monster_dps - player_heal_rate)
-        ettk += BANK_DELAY / monsters_per_bank
+    if enemy_dps > PLAYER_HEAL_RATE:
+        total_hp = player.hitpoints + 27 * 10
+        dmg_per_enemy = ettk * (enemy_dps - PLAYER_HEAL_RATE)
+        enemies_per_bank = total_hp / dmg_per_enemy
+        ettk += BANK_DELAY / enemies_per_bank
 
-    ev = monster.hitpoints * 4. / ettk
+    return enemy.hitpoints * 4. / (ettk / 3600)
 
 
 ###########################################################
@@ -554,14 +586,22 @@ TODO
 """
 def find_bis_armor(player, attack_style):
     aset = {s: None for s in SLOTS}
-    for slot, items in all_armor.items():
+    for slot, dic in equipment_dict.items():
+        if slot == 'weapon':
+            continue
+
         eligible = []
-        for i in items:
-            if not i.equipment.requirements:
-                pass
-            for stat in ['defence', 'attack', 'strength', 'ranged', 'magic',
-                         'prayer']:
-                pass
+        for i in dic.values():
+            elig = True
+            for stat in PLAYER_SKILLS:
+                req = i.equipment.requirements.get(stat, 1)
+                if getattr(player, stat) < req:
+                    elig = False
+                    break
+
+            if elig:
+                eligible.append(i)
+
         attr = 'defence_' + attack_style
         aset[slot] = max(items, key=lambda i: getattr(i.equipment, attr))
 
@@ -569,38 +609,52 @@ def find_bis_armor(player, attack_style):
 
 
 """
-For a given attack level, strength level, and training style, find the fastest
-possible way to get to the next level
-"""
-def best_rate(attack, strength, aggressive, monsters=all_monsters):
-    best_rate = 0
-    best_combo = None
+For a given set of stats, training style, and target monster, find the weapon
+that will gain XP fastest.
 
-    player = Player(attack=attack, strength=strength)
+stat must be one of 'strength', 'attack', 'defence'.
+"""
+def best_weapon(player, monster, stat='attack', n_results=10):
+    results = []
 
     for weapon in all_weapons:
         # make sure the player has the required levels to weild the weapon
-        if (weapon.equipment.requirements and
-            (player.attack < weapon.equipment.requirements.get('attack', 1) or
-             player.strength < weapon.equipment.requirements.get('strength', 1))):
+        if not player.can_equip(weapon):
             continue
 
         for stance in weapon.weapon.stances:
-            if (aggressive and stance['experience'] == 'strength' or
-                (not aggressive) and stance['experience'] == 'attack'):
-                for monster in monsters:
-                    rate = xp_rate(player, monster, weapon, stance)
-                    if rate > best_rate:
-                        best_rate = rate
-                        best_combo = (weapon.name, stance['combat_style'],
-                                      '%s lvl %d' % (monster.name,
-                                                     monster.combat_level))
+            if stance['experience'] == stat or \
+                    stance['experience'] == 'balanced':
+                #player.equip = find_bis_armor(player, stance['attack_style'])
+                player.equip.weapon = weapon
+                player.equip.stance = stance
 
-    return best_combo, best_rate
+                rate = xp_rate(player, monster)
+                combo = (weapon.name, stance['combat_style'])
+                results.append((rate, combo))
+
+    return list(sorted(results))[:-n_results:-1]
 
 
 """
-How many XP are required from level lvl - 1 to lvl?
+For a given player, find the monster that will let them train XP fastest.
+"""
+def best_monster(player, monsters=all_monsters, n_results=10):
+    results = []
+
+    for monster in monsters:
+        if not monster.attack_speed:
+            continue
+
+        rate = xp_rate(player, monster)
+        monster = ('%s lv. %d' % (monster.name, monster.combat_level))
+        results.append((rate, monster))
+
+    return list(sorted(results))[:-n_results:-1]
+
+
+"""
+How many XP are required from level (lvl - 1) to lvl?
 """
 def xp_req(lvl):
     return int(lvl - 1 + 300 * 2 ** ((lvl - 1) / 7.)) / 4.
